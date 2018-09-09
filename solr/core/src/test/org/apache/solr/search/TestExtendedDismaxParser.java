@@ -521,6 +521,15 @@ public class TestExtendedDismaxParser extends SolrTestCaseJ4 {
      );
   }
 
+  public void testFuzzyQf() {
+    String oner = "*[count(//doc)=1]";
+    String nor = "*[count(//doc)=0]";
+
+    // Test a typo with/without fuzzy spec in qf
+    assertQ(req("defType", "edismax", "qf", "text_sw^5", "q", "potentibl"), nor);
+    assertQ(req("defType", "edismax", "qf", "text_sw~0.5^5", "q", "potentibl"), oner);
+  }
+
   public void testUserFields() {
     String allr = "*[count(//doc)=10]";
     String oner = "*[count(//doc)=1]";
@@ -1987,7 +1996,7 @@ public class TestExtendedDismaxParser extends SolrTestCaseJ4 {
         super(localParams, params, req);
         String language = params.get("language");
         if(language != null) {
-          super.queryFields = SolrPluginUtils.parseFieldBoosts(solrParams.getParams("qf_" + language)); 
+          super.queryFields = SolrPluginUtils.parseFieldBoostsAndFuzzy(solrParams.getParams("qf_" + language));
         }
       }
       

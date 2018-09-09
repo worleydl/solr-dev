@@ -48,6 +48,7 @@ import org.apache.lucene.search.PhraseQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.Version;
 import org.apache.solr.analysis.TokenizerChain;
+import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.DisMaxParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
@@ -55,6 +56,7 @@ import org.apache.solr.parser.QueryParser;
 import org.apache.solr.parser.SolrQueryParserBase.MagicFieldName;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.schema.FieldType;
+import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.util.SolrPluginUtils;
 
 import com.google.common.collect.Multimap;
@@ -77,7 +79,23 @@ public class ExtendedDismaxQParser extends QParser {
   private static class U extends SolrPluginUtils {
     /* :NOOP */
   }
-  
+
+  /**
+   * Uses {@link SolrPluginUtils#parseFieldBoosts(String)} with the 'qf' parameter. Falls back to the 'df' parameter
+   */
+  public static List<FuzzyFieldParams> parseQueryFields(final IndexSchema indexSchema, final SolrParams solrParams)
+      throws SyntaxError {
+    List<FuzzyFieldParams> queryFields = SolrPluginUtils.parseFieldBoostsAndFuzzy(solrParams.getParams(DisMaxParams.QF));
+    if (queryFields.isEmpty()) {
+      String df = solrParams.get(CommonParams.DF);
+      if (df == null) {
+        throw new SyntaxError("Neither "+DisMaxParams.QF+" nor "+CommonParams.DF +" are present.");
+      }
+      queryFields.add(new FuzzyFieldParams(df, -1.0f, 1.0f));
+    }
+    return queryFields;
+  }
+
   /** shorten the class references for utilities */
   private static interface DMP extends DisMaxParams {
     /**
@@ -204,7 +222,7 @@ public class ExtendedDismaxQParser extends QParser {
     
     return topQuery;
   }
-  
+
   /**
    * Adds shingled phrase queries to all the fields specified in the pf, pf2 anf pf3 parameters
    * 
@@ -213,7 +231,7 @@ public class ExtendedDismaxQParser extends QParser {
       ExtendedDismaxConfiguration config) throws SyntaxError {
 
     // sloppy phrase queries for proximity
-    List<FieldParams> allPhraseFields = config.getAllPhraseFields();
+    List<PhraseFieldParams> allPhraseFields = config.getAllPhraseFields();
     
     if (allPhraseFields.size() > 0) {
       // find non-field clauses
@@ -230,16 +248,16 @@ public class ExtendedDismaxQParser extends QParser {
       }
 
       // create a map of {wordGram, [phraseField]}
-      Multimap<Integer, FieldParams> phraseFieldsByWordGram = Multimaps.index(allPhraseFields, FieldParams::getWordGrams);
+      Multimap<Integer, PhraseFieldParams> phraseFieldsByWordGram = Multimaps.index(allPhraseFields, PhraseFieldParams::getWordGrams);
 
       // for each {wordGram, [phraseField]} entry, create and add shingled field queries to the main user query
-      for (Map.Entry<Integer, Collection<FieldParams>> phraseFieldsByWordGramEntry : phraseFieldsByWordGram.asMap().entrySet()) {
+      for (Map.Entry<Integer, Collection<PhraseFieldParams>> phraseFieldsByWordGramEntry : phraseFieldsByWordGram.asMap().entrySet()) {
 
         // group the fields within this wordGram collection by their associated slop (it's possible that the same
         // field appears multiple times for the same wordGram count but with different slop values. In this case, we
         // should take the *sum* of those phrase queries, rather than the max across them).
-        Multimap<Integer, FieldParams> phraseFieldsBySlop = Multimaps.index(phraseFieldsByWordGramEntry.getValue(), FieldParams::getSlop);
-        for (Map.Entry<Integer, Collection<FieldParams>> phraseFieldsBySlopEntry : phraseFieldsBySlop.asMap().entrySet()) {
+        Multimap<Integer, PhraseFieldParams> phraseFieldsBySlop = Multimaps.index(phraseFieldsByWordGramEntry.getValue(), PhraseFieldParams::getSlop);
+        for (Map.Entry<Integer, Collection<PhraseFieldParams>> phraseFieldsBySlopEntry : phraseFieldsBySlop.asMap().entrySet()) {
           addShingledPhraseQueries(query, normalClauses, phraseFieldsBySlopEntry.getValue(),
               phraseFieldsByWordGramEntry.getKey(), config.tiebreaker, phraseFieldsBySlopEntry.getKey());
         }
@@ -498,7 +516,7 @@ public class ExtendedDismaxQParser extends QParser {
         // Add the alias
         String fname = param.substring(2,param.length()-3);
         String qfReplacement = config.solrParams.get(param);
-        Map<String,Float> parsedQf = SolrPluginUtils.parseFieldBoosts(qfReplacement);
+        List<FuzzyFieldParams> parsedQf = SolrPluginUtils.parseFieldBoostsAndFuzzy(new String[]{qfReplacement});
         if(parsedQf.size() == 0)
           return;
         up.addAlias(fname, tiebreaker, parsedQf);
@@ -517,9 +535,9 @@ public class ExtendedDismaxQParser extends QParser {
    * @param shingleSize how big the phrases should be, 0 means a single phrase
    * @param tiebreaker tie breaker value for the DisjunctionMaxQueries
    */
-  protected void addShingledPhraseQueries(final BooleanQuery.Builder mainQuery, 
+  protected void addShingledPhraseQueries(final BooleanQuery.Builder mainQuery,
       final List<Clause> clauses,
-      final Collection<FieldParams> fields,
+      final Collection<PhraseFieldParams> fields,
       int shingleSize,
       final float tiebreaker,
       final int slop)
@@ -547,7 +565,7 @@ public class ExtendedDismaxQParser extends QParser {
     /* for parsing sloppy phrases using DisjunctionMaxQueries */
     ExtendedSolrQueryParser pp = createEdismaxQueryParser(this, IMPOSSIBLE_FIELD_NAME);
 
-    pp.addAlias(IMPOSSIBLE_FIELD_NAME, tiebreaker, getFieldBoosts(fields));
+    pp.addAlias(IMPOSSIBLE_FIELD_NAME, tiebreaker, getFuzzyFromPhrase(fields));
     pp.setPhraseSlop(slop);
     pp.setRemoveStopFilter(true);  // remove stop filter and keep stopwords
     pp.setSplitOnWhitespace(config.splitOnWhitespace);
@@ -583,22 +601,9 @@ public class ExtendedDismaxQParser extends QParser {
     }
   }
 
-  /**
-   * @return a {fieldName, fieldBoost} map for the given fields.
-   */
-  private Map<String, Float> getFieldBoosts(Collection<FieldParams> fields) {
-    Map<String, Float> fieldBoostMap = new LinkedHashMap<>(fields.size());
-
-    for (FieldParams field : fields) {
-      fieldBoostMap.put(field.getField(), field.getBoost());
-    }
-
-    return fieldBoostMap;
-  }
-
   @Override
   public String[] getDefaultHighlightFields() {
-    return config.queryFields.keySet().toArray(new String[0]);
+    return config.queryFields.stream().map(FuzzyFieldParams::getField).toArray(String[]::new);
   }
   
   @Override
@@ -618,6 +623,16 @@ public class ExtendedDismaxQParser extends QParser {
           QueryParsing.toString(boostQueries, getReq().getSchema()));
     }
     debugInfo.add("boostfuncs", getReq().getParams().getParams(DisMaxParams.BF));
+  }
+
+  private List<FuzzyFieldParams> getFuzzyFromPhrase(Collection<PhraseFieldParams> fields) {
+    List<FuzzyFieldParams> fp = new LinkedList<>();
+
+    for (PhraseFieldParams pfp : fields) {
+      fp.add(new FuzzyFieldParams(pfp.getField(), -1.0f, pfp.getBoost()));
+    }
+
+    return fp;
   }
 
   protected static class Clause {
@@ -880,7 +895,7 @@ public class ExtendedDismaxQParser extends QParser {
      */
     protected static class Alias {
       public float tie;
-      public Map<String,Float> fields;
+      public List<FuzzyFieldParams> fields;
     }
     
     boolean makeDismax=true;
@@ -943,7 +958,7 @@ public class ExtendedDismaxQParser extends QParser {
      * @see SolrPluginUtils#parseFieldBoosts
      */
     public void addAlias(String field, float tiebreaker,
-        Map<String,Float> fieldBoosts) {
+        List<FuzzyFieldParams> fieldBoosts) {
       Alias a = new Alias();
       a.tie = tiebreaker;
       a.fields = fieldBoosts;
@@ -1263,14 +1278,14 @@ public class ExtendedDismaxQParser extends QParser {
         return false;
       }
       boolean hascycle = false;
-      for(String referencedField:this.getAlias(field).fields.keySet()) {
-        if(!set.add(referencedField)) {
+      for(FuzzyFieldParams fp : getAlias(field).fields) {
+        if(!set.add(fp.getField())) {
           hascycle = true;
         } else {
-          if(validateField(referencedField, set)) {
+          if(validateField(fp.getField(), set)) {
             hascycle = true;
           }
-          set.remove(referencedField);
+          set.remove(fp.getField());
         }
       }
       return hascycle;
@@ -1281,11 +1296,16 @@ public class ExtendedDismaxQParser extends QParser {
       if (a.fields.size()==0) return null;
       List<Query> lst= new ArrayList<>(4);
       
-      for (String f : a.fields.keySet()) {
-        this.field = f;
+      for (FuzzyFieldParams fp : a.fields) {
+        this.field = fp.getField();
+
+        // Set the flt val to the fp fuzzy val
+        if (this.type == QType.FIELD)
+          this.flt = fp.getFuzzy();
+
         Query sub = getAliasedQuery();
         if (sub != null) {
-          Float boost = a.fields.get(f);
+          Float boost = fp.getBoost();
           if (boost != null && boost.floatValue() != 1f) {
             sub = new BoostQuery(sub, boost);
           }
@@ -1300,11 +1320,11 @@ public class ExtendedDismaxQParser extends QParser {
       if (a.fields.size()==0) return null;
       List<Query> lst= new ArrayList<>(4);
 
-      for (String f : a.fields.keySet()) {
-        this.field = f;
+      for (FuzzyFieldParams fp : a.fields) {
+        this.field = fp.getField();
         Query sub = getAliasedMultiTermQuery();
         if (sub != null) {
-          Float boost = a.fields.get(f);
+          Float boost = fp.getBoost();
           if (boost != null && boost.floatValue() != 1f) {
             sub = new BoostQuery(sub, boost);
           }
@@ -1316,9 +1336,12 @@ public class ExtendedDismaxQParser extends QParser {
 
     private Query getQuery() {
       try {
-        
+
         switch (type) {
-          case FIELD:  // fallthrough
+          case FIELD:
+            if (field != null && flt > 0.0f && val != null) {
+              return super.getFuzzyQuery(field, val, flt);
+            }
           case PHRASE:
             Query query;
             if (val == null) {
@@ -1563,7 +1586,7 @@ public class ExtendedDismaxQParser extends QParser {
      * The field names specified by 'qf' that (most) clauses will 
      * be queried against 
      */
-    protected Map<String,Float> queryFields;
+    protected List<FuzzyFieldParams> queryFields;
     
     /** 
      * The field names specified by 'uf' that users are 
@@ -1580,7 +1603,7 @@ public class ExtendedDismaxQParser extends QParser {
     protected SolrParams solrParams;
     protected String minShouldMatch;
     
-    protected List<FieldParams> allPhraseFields;
+    protected List<PhraseFieldParams> allPhraseFields;
     
     protected float tiebreaker;
     
@@ -1605,7 +1628,7 @@ public class ExtendedDismaxQParser extends QParser {
       final boolean forbidSubQueryByDefault = req.getCore().getSolrConfig().luceneMatchVersion.onOrAfter(Version.LUCENE_7_2_0);
       userFields = new UserFields(U.parseFieldBoosts(solrParams.getParams(DMP.UF)), forbidSubQueryByDefault);
       try {
-        queryFields = DisMaxQParser.parseQueryFields(req.getSchema(), solrParams);  // req.getSearcher() here causes searcher refcount imbalance
+        queryFields = parseQueryFields(req.getSchema(), solrParams);  // req.getSearcher() here causes searcher refcount imbalance
       } catch (SyntaxError e) {
         throw new RuntimeException(e);
       }
@@ -1615,9 +1638,9 @@ public class ExtendedDismaxQParser extends QParser {
       pslop[2] = solrParams.getInt(DisMaxParams.PS2, pslop[0]);
       pslop[3] = solrParams.getInt(DisMaxParams.PS3, pslop[0]);
       
-      List<FieldParams> phraseFields = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF),0,pslop[0]);
-      List<FieldParams> phraseFields2 = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF2),2,pslop[2]);
-      List<FieldParams> phraseFields3 = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF3),3,pslop[3]);
+      List<PhraseFieldParams> phraseFields = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF),0,pslop[0]);
+      List<PhraseFieldParams> phraseFields2 = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF2),2,pslop[2]);
+      List<PhraseFieldParams> phraseFields3 = U.parseFieldBoostsAndSlop(solrParams.getParams(DMP.PF3),3,pslop[3]);
       
       allPhraseFields = new ArrayList<>(phraseFields.size() + phraseFields2.size() + phraseFields3.size());
       allPhraseFields.addAll(phraseFields);
@@ -1670,7 +1693,7 @@ public class ExtendedDismaxQParser extends QParser {
       return boostParams!=null && boostParams.length>0;
     }
     
-    public List<FieldParams> getAllPhraseFields() {
+    public List<PhraseFieldParams> getAllPhraseFields() {
       return allPhraseFields;
     }
   }

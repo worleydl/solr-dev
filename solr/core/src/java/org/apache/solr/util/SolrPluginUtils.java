@@ -67,7 +67,8 @@ import org.apache.solr.search.CacheRegenerator;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocList;
 import org.apache.solr.search.DocSet;
-import org.apache.solr.search.FieldParams;
+import org.apache.solr.search.FuzzyFieldParams;
+import org.apache.solr.search.PhraseFieldParams;
 import org.apache.solr.search.QParser;
 import org.apache.solr.search.QueryParsing;
 import org.apache.solr.search.ReturnFields;
@@ -545,18 +546,52 @@ public class SolrPluginUtils {
   /**
 
   /**
+   * Like {@link #parseFieldBoosts}, but allows for an optional fuzzy distance value prefixed by "~".
+   *
+   * @param fieldLists - an array of Strings eg. <code>{"fieldOne^2.3", "fieldTwo", fieldThree~0.2^-0.4}</code>
+
+   * @return - FuzzyFieldParams containing the fieldname, fuzzy distance and boost
+  */
+  public static List<FuzzyFieldParams> parseFieldBoostsAndFuzzy(String[] fieldLists) {
+    if (null == fieldLists || 0 == fieldLists.length) {
+      return new ArrayList<>();
+    }
+    List<FuzzyFieldParams> out = new ArrayList<>();
+    for (String in : fieldLists) {
+      if (null == in) {
+        continue;
+      }
+      in = in.trim();
+      if(in.length()==0) {
+        continue;
+      }
+      String[] fieldConfigs = whitespacePattern.split(in);
+      for (String s : fieldConfigs) {
+        String[] fieldAndSlopVsBoost = caratPattern.split(s);
+        String[] fieldVsFuzzy = tildePattern.split(fieldAndSlopVsBoost[0]);
+        String field = fieldVsFuzzy[0];
+        float fuzzy  = (2 == fieldVsFuzzy.length) ? Float.parseFloat(fieldVsFuzzy[1]) : -1.0f;
+        float boost = (1 == fieldAndSlopVsBoost.length) ? 1  : Float.parseFloat(fieldAndSlopVsBoost[1]);
+        FuzzyFieldParams fp = new FuzzyFieldParams(field,fuzzy,boost);
+        out.add(fp);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Like {@link #parseFieldBoosts}, but allows for an optional slop value prefixed by "~".
    *
    * @param fieldLists - an array of Strings eg. <code>{"fieldOne^2.3", "fieldTwo", fieldThree~5^-0.4}</code>
    * @param wordGrams - (0=all words, 2,3 = shingle size)
    * @param defaultSlop - the default slop for this param
-   * @return - FieldParams containing the fieldname,boost,slop,and shingle size
+   * @return - PhraseFieldParams containing the fieldname,boost,slop,and shingle size
    */
-  public static List<FieldParams> parseFieldBoostsAndSlop(String[] fieldLists,int wordGrams,int defaultSlop) {
+  public static List<PhraseFieldParams> parseFieldBoostsAndSlop(String[] fieldLists, int wordGrams, int defaultSlop) {
     if (null == fieldLists || 0 == fieldLists.length) {
         return new ArrayList<>();
     }
-    List<FieldParams> out = new ArrayList<>();
+    List<PhraseFieldParams> out = new ArrayList<>();
     for (String in : fieldLists) {
       if (null == in) {
         continue;
@@ -572,7 +607,7 @@ public class SolrPluginUtils {
         String field = fieldVsSlop[0];
         int slop  = (2 == fieldVsSlop.length) ? Integer.parseInt(fieldVsSlop[1]) : defaultSlop;
         float boost = (1 == fieldAndSlopVsBoost.length) ? 1  : Float.parseFloat(fieldAndSlopVsBoost[1]);
-        FieldParams fp = new FieldParams(field,wordGrams,slop,boost);
+        PhraseFieldParams fp = new PhraseFieldParams(field,wordGrams,slop,boost);
         out.add(fp);
       }
     }
